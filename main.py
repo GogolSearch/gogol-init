@@ -9,6 +9,7 @@ import logging
 import sys
 
 import redis
+from redis.exceptions import LockError
 
 from implementations.lock import RedisLock
 
@@ -83,6 +84,11 @@ def parse_args() -> argparse.Namespace:
         "--lock_name",
         type=str,
         default=get_env_variable('LOCK_NAME', default="crawler:db_lock")
+    )
+    parser.add_argument(
+        "--lock_timeout",
+        type=int,
+        default=get_env_variable('LOCK_TIMEOUT', default=900)
     )
 
     # Parse and return the arguments
@@ -559,6 +565,7 @@ def main():
             encoding="utf-8",
             decode_responses=True
         )
+        logging.info("Redis connection established.")
     except redis.exceptions.ConnectionError as e:
         logging.error(f"Error connecting to the Redis database: {traceback.format_exc()}")
         return
@@ -566,20 +573,28 @@ def main():
     lock = RedisLock(redis_client, lock_name=config["lock_name"])
 
     while running:
-        time.sleep(86400)
+        time.sleep(30)
+        if lock.owned():
+            logging.debug("Owned lock, releasing it and waiting for, crawlers to use it.")
+            lock.release()
+            time.sleep(30)
         cursor = connection.cursor()
         try:
-            lock.acquire(blocking=True)
-            logging.info("Start page rank calculation")
-            start = time.perf_counter()
-            cursor.execute(f"CALL calculate_pagerank()")
-            end = time.perf_counter()
-            delta = end - start
-            logging.info(f"Page rank calculation took {delta} seconds.")
-            connection.commit()
+            if lock.acquire(blocking=True, blocking_timeout=config["lock_timeout"], token=token):
+                logging.info("Starting page rank calculation")
+                start = time.perf_counter()
+                cursor.execute(f"CALL calculate_pagerank()")
+                end = time.perf_counter()
+                delta = end - start
+                logging.info(f"Page rank calculation took {delta} seconds.")
+                connection.commit()
+            else:
+                logging.info("Lock was already held trying next time.")
         except psycopg.Error as e:
             logging.error(f"Error while executing SQL command:\n{traceback.format_exc()}")
             connection.rollback()
+        except TimeoutError as e:
+            logging.error(f"Lock error: {traceback.format_exc()}")
         finally:
             cursor.close()
             if lock.owned():
