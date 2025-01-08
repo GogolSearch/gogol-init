@@ -1,10 +1,16 @@
 import argparse
 import os
+import time
 import traceback
+import uuid
 
 import psycopg
 import logging
 import sys
+
+import redis
+
+from implementations.lock import RedisLock
 
 
 # Helper function to fetch environment variables with optional default
@@ -54,15 +60,38 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=get_env_variable('LOG_LEVEL', default="INFO")
     )
+    # Redis arguments
+    parser.add_argument(
+        '--redis_host',
+        type=str,
+        default=get_env_variable('REDIS_HOST')
+    )
+
+    parser.add_argument(
+        '--redis_port',
+        type=int,
+        default=get_env_variable('REDIS_PORT')
+    )
+
+    parser.add_argument(
+        '--redis_db',
+        type=int,
+        default=get_env_variable('REDIS_DB', default=0)
+    )
+
+    parser.add_argument(
+        "--lock_name",
+        type=str,
+        default=get_env_variable('LOCK_NAME', default="crawler:db_lock")
+    )
 
     # Parse and return the arguments
     return parser.parse_args()
 
 
 # Function to create tables if they don't already exist
-def init_database(connection):
+def init_database(cursor):
     """Create database tables if they don't already exist."""
-    cursor = connection.cursor()
 
     # Define the full SQL schema to create tables, indexes, constraints, functions, and views
     sql_commands = [
@@ -472,7 +501,7 @@ def init_database(connection):
         logging.debug(f"Running command:\n{sql_command}\n")
         cursor.execute(sql_command)
         logging.info("Executed SQL command.")
-    cursor.close()
+
 
 def configure_logging(log_level) -> None:
     """Configure logging for the application."""
@@ -483,6 +512,7 @@ def configure_logging(log_level) -> None:
 def main():
     args = parse_args()
     config = vars(args)  # Convert Namespace to dict
+    token = str(uuid.uuid1()) + "-init"
 
     # Check for missing required configurations
     for k, v in config.items():
@@ -507,6 +537,7 @@ def main():
         return
 
     # Create tables if they don't exist
+    cursor = connection.cursor()
     try:
         init_database(connection)
         logging.info("Database tables ensured.")
@@ -514,11 +545,51 @@ def main():
     except psycopg.Error as e:
         logging.error(f"Error while executing SQL command:\n{traceback.format_exc()}")
         connection.rollback()
+        connection.close()
+        logging.info("Database connection closed.")
     finally:
-        if connection:
-            connection.close()
-            logging.info("Database connection closed.")
+        cursor.close()
 
+    running = True
+    try:
+        redis_client = redis.Redis(
+            host=config["redis_host"],
+            port=config["redis_port"],
+            db=config["redis_db"],
+            encoding="utf-8",
+            decode_responses=True
+        )
+    except redis.exceptions.ConnectionError as e:
+        logging.error(f"Error connecting to the Redis database: {traceback.format_exc()}")
+        return
+
+    lock = RedisLock(redis_client, lock_name=config["lock_name"])
+
+    while running:
+        time.sleep(86400)
+        cursor = connection.cursor()
+        try:
+            lock.acquire(blocking=True)
+            logging.info("Start page rank calculation")
+            start = time.perf_counter()
+            cursor.execute(f"CALL calculate_pagerank()")
+            end = time.perf_counter()
+            delta = end - start
+            logging.info(f"Page rank calculation took {delta} seconds.")
+            connection.commit()
+        except psycopg.Error as e:
+            logging.error(f"Error while executing SQL command:\n{traceback.format_exc()}")
+            connection.rollback()
+        finally:
+            cursor.close()
+            if lock.owned():
+                lock.release()
+
+    # we never know
+    if lock.owned():
+        lock.release()
+    redis_client.close()
+    connection.close()
 
 if __name__ == "__main__":
     main()
