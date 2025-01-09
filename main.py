@@ -308,7 +308,7 @@ def init_database(cursor):
                 content TEXT,
                 icon CHARACTER VARYING(2048),
                 adult BOOLEAN,
-                metadata JSON,
+                metadata JSONB,
                 links JSONB,
                 redirect_type INTEGER,
                 canonical_url TEXT
@@ -324,7 +324,7 @@ def init_database(cursor):
                 page->>'content',
                 page->>'icon',
                 page->>'adult',
-                page->>'metadata',
+                page->'metadata',
                 page->'links',
                 (page->>'redirect_type')::INTEGER,
                 page->>'canonical_url'
