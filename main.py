@@ -141,14 +141,13 @@ def init_database(cursor):
             "metadata" json,
             "created_at" timestamp DEFAULT now() NOT NULL,
             "icon" character varying(2048),
-            "adult" boolean,
             CONSTRAINT "pages_pkey" PRIMARY KEY ("url_id")
         ) WITH (oids = false);
         """,
         """
         CREATE INDEX IF NOT EXISTS pages_idx 
         ON "public"."pages" USING bm25 (
-            url_id, title, description, content, icon, adult, metadata, created_at
+            url_id, title, description, content
         ) WITH (key_field='url_id');
         """,
         """
@@ -307,7 +306,6 @@ def init_database(cursor):
                 description TEXT,
                 content TEXT,
                 icon CHARACTER VARYING(2048),
-                adult BOOLEAN,
                 metadata JSONB,
                 links JSONB,
                 redirect_type INTEGER,
@@ -315,7 +313,7 @@ def init_database(cursor):
             );
         
             -- Step 2: Populate page_data from the input JSON
-            INSERT INTO page_data (url, old_url, title, description, content, icon, adult, metadata, links, redirect_type, canonical_url)
+            INSERT INTO page_data (url, old_url, title, description, content, icon, metadata, links, redirect_type, canonical_url)
             SELECT DISTINCT ON (page->>'url') 
                 page->>'url',
                 page->>'old_url',
@@ -323,7 +321,6 @@ def init_database(cursor):
                 page->>'description',
                 page->>'content',
                 page->>'icon',
-                page->>'adult',
                 page->'metadata',
                 page->'links',
                 (page->>'redirect_type')::INTEGER,
@@ -413,8 +410,8 @@ def init_database(cursor):
             ON CONFLICT (source_url_id, destination_url_id) DO NOTHING;
         
             -- Step 9: Insert or update page data into the pages table
-            INSERT INTO pages (url_id, title, description, content, icon, adult, metadata, created_at)
-            SELECT DISTINCT ON (COALESCE(u_canonical.id, u.id)) COALESCE(u_canonical.id, u.id) AS url_id, pd.title, pd.description, pd.content, pd.icon, pd.adult, pd.metadata, NOW()
+            INSERT INTO pages (url_id, title, description, content, icon, metadata, created_at)
+            SELECT DISTINCT ON (COALESCE(u_canonical.id, u.id)) COALESCE(u_canonical.id, u.id) AS url_id, pd.title, pd.description, pd.content, pd.icon, pd.metadata, NOW()
             FROM page_data pd
             JOIN urls u ON u.url = pd.url
             LEFT JOIN urls u_canonical ON u_canonical.url = pd.canonical_url
@@ -423,7 +420,6 @@ def init_database(cursor):
                     description = EXCLUDED.description,
                     content = EXCLUDED.content,
                     icon = EXCLUDED.icon,
-                    adult = EXCLUDED.adult,
                     metadata = EXCLUDED.metadata;
         
             -- Step 10: Mark pages as processed by setting queued = false
