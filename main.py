@@ -90,6 +90,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=get_env_variable('LOCK_TIMEOUT', default=900)
     )
+    parser.add_argument(
+        "--pagerank_delay",
+        type=int,
+        default=get_env_variable('PAGERANK_DELAY', default=10800)
+    )
 
     # Parse and return the arguments
     return parser.parse_args()
@@ -576,7 +581,8 @@ def main():
     lock = RedisLock(redis_client, lock_name=config["lock_name"])
 
     while running:
-        time.sleep(30)
+        logging.info(f"Waiting {config['pagerank_delay']} seconds...")
+        time.sleep(config["pagerank_delay"])
         if lock.owned():
             logging.debug("Owned lock, releasing it and waiting for, crawlers to use it.")
             lock.release()
