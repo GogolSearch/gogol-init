@@ -3,13 +3,11 @@ import os
 import time
 import traceback
 import uuid
-
 import psycopg
 import logging
 import sys
-
 import redis
-from redis.exceptions import LockError
+import signal
 
 from implementations.lock import RedisLock
 
@@ -519,6 +517,26 @@ def configure_logging(log_level) -> None:
     levels = logging.getLevelNamesMapping()
     logging.basicConfig(level=levels.get(log_level, logging.INFO), stream=sys.stdout)
 
+
+def cleanup(signal, frame, connection, redis_client, lock):
+    """Cleanup function to close resources on signal interrupt or terminate."""
+    logging.info("Received termination signal, closing resources.")
+
+    # Release the lock if it's owned
+    if lock.owned():
+        lock.release()
+
+    # Close the Redis connection
+    redis_client.close()
+
+    # Close the PostgreSQL connection
+    if connection:
+        connection.close()
+
+    logging.info("Resources closed successfully.")
+    sys.exit(0)
+
+
 # Main function to create the app
 def main():
     args = parse_args()
@@ -577,11 +595,15 @@ def main():
 
     lock = RedisLock(redis_client, lock_name=config["lock_name"])
 
+    # Setup signal handling
+    signal.signal(signal.SIGINT, lambda signal, frame: cleanup(signal, frame, connection, redis_client, lock))
+    signal.signal(signal.SIGTERM, lambda signal, frame: cleanup(signal, frame, connection, redis_client, lock))
+
     while running:
         logging.info(f"Waiting {config['pagerank_delay']} seconds...")
-        time.sleep(config["pagerank_delay"])
+        time.sleep(config['pagerank_delay'])
         if lock.owned():
-            logging.debug("Owned lock, releasing it and waiting for, crawlers to use it.")
+            logging.debug("Owned lock, releasing it and waiting for crawlers to use it.")
             lock.release()
             time.sleep(30)
         cursor = connection.cursor()
@@ -606,11 +628,12 @@ def main():
             if lock.owned():
                 lock.release()
 
-    # we never know
+    # Final cleanup, in case loop exits unexpectedly
     if lock.owned():
         lock.release()
     redis_client.close()
     connection.close()
+
 
 if __name__ == "__main__":
     main()
