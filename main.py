@@ -293,7 +293,7 @@ def init_database(cursor):
         GROUP BY source_url_id;
         """,
         """
-        CREATE OR REPLACE PROCEDURE batch_insert_pages(p_pages jsonb)
+        CREATE OR REPLACE PROCEDURE batch_insert_pages(p_pages json)
         LANGUAGE plpgsql AS $$
         BEGIN
             -- Step 1: Create Temporary Table to store page data
@@ -304,8 +304,8 @@ def init_database(cursor):
                 description TEXT,
                 content TEXT,
                 icon CHARACTER VARYING(2048),
-                metadata JSONB,
-                links JSONB,
+                metadata json,
+                links json,
                 redirect_type INTEGER,
                 canonical_url TEXT
             );
@@ -323,7 +323,7 @@ def init_database(cursor):
                 page->'links',
                 (page->>'redirect_type')::INTEGER,
                 page->>'canonical_url'
-            FROM jsonb_array_elements(p_pages) AS page;
+            FROM json_array_elements(p_pages) AS page;
         
             -- Step 3: Insert new URLs into the urls table, and avoid duplication
             INSERT INTO urls (url, failed_tries, queued, last_crawled_at)
@@ -395,14 +395,14 @@ def init_database(cursor):
             INSERT INTO urls (url)
             SELECT DISTINCT link_url
             FROM page_data pd
-            CROSS JOIN jsonb_array_elements_text(pd.links) AS link_url
+            CROSS JOIN json_array_elements_text(pd.links) AS link_url
             ON CONFLICT (url) DO NOTHING;
         
             -- Step 8: Insert relationships into the links table (source -> destination)
             INSERT INTO links (source_url_id, destination_url_id)
             SELECT u1.id AS source_url_id, u2.id AS destination_url_id
             FROM page_data pd
-            CROSS JOIN jsonb_array_elements_text(pd.links) AS link_url
+            CROSS JOIN json_array_elements_text(pd.links) AS link_url
             JOIN urls u1 ON u1.url = pd.url
             JOIN urls u2 ON u2.url = link_url
             ON CONFLICT (source_url_id, destination_url_id) DO NOTHING;
@@ -447,26 +447,30 @@ def init_database(cursor):
         CREATE OR REPLACE PROCEDURE calculate_pagerank()
         LANGUAGE plpgsql AS $$
         DECLARE
-            d CONSTANT DOUBLE PRECISION := 0.85; -- Facteur de dissipation
-            epsilon CONSTANT DOUBLE PRECISION := 0.0001; -- Seuil de convergence
-            delta DOUBLE PRECISION := 1.0; -- Différence totale initiale
-            iteration INT := 0; -- Compteur d'itérations
+            d CONSTANT DOUBLE PRECISION := 0.85; -- Damping factor
+            epsilon CONSTANT DOUBLE PRECISION := 0.0001; -- Convergence threshold
+            delta DOUBLE PRECISION := 1.0; -- Initial total difference
+            iteration INT := 0; -- Iteration counter
         BEGIN
-            -- Étape 1: Initialisation dans une table temporaire
-            CREATE TEMP TABLE temp_pagerank AS
-            WITH url_count AS (
-                SELECT COUNT(DISTINCT source_url_id) AS total_count
-                FROM resolved_links
-            )
+            -- Step 1: Create the temporary table once
+            CREATE TEMP TABLE IF NOT EXISTS temp_pagerank (
+                url_id BIGINT PRIMARY KEY,
+                rank DOUBLE PRECISION
+            ) ON COMMIT DROP;
+        
+            -- Step 2: Initialize the temporary table with initial ranks
+            TRUNCATE temp_pagerank;
+            INSERT INTO temp_pagerank (url_id, rank)
             SELECT DISTINCT
                 rl.source_url_id AS url_id,
-                1.0 / (SELECT total_count FROM url_count) AS rank
+                1.0 / (SELECT COUNT(DISTINCT source_url_id) FROM resolved_links) AS rank
             FROM resolved_links rl;
         
-            -- Étape 2: Itérations pour calculer le PageRank
+            -- Step 3: Iteratively compute PageRank
             WHILE delta > epsilon AND iteration < 100 LOOP
-                -- Calculer les nouveaux PageRanks dans une table temporaire intermédiaire
-                CREATE TEMP TABLE new_ranks AS
+                -- Use a temporary in-memory table for new ranks
+                TRUNCATE temp_pagerank; -- Clear table for the next iteration
+                INSERT INTO temp_pagerank (url_id, rank)
                 SELECT
                     rl.destination_url_id AS url_id,
                     (1 - d) + d * SUM(tp.rank / ol.outbound_count) AS rank
@@ -476,34 +480,24 @@ def init_database(cursor):
                 INNER JOIN outgoing_links ol ON rl.source_url_id = ol.source_url_id
                 GROUP BY rl.destination_url_id;
         
-                -- Calculer la différence totale pour la convergence
+                -- Compute delta for convergence
                 SELECT SUM(ABS(tp.rank - nr.rank)) INTO delta
                 FROM temp_pagerank tp
-                INNER JOIN new_ranks nr ON tp.url_id = nr.url_id;
+                INNER JOIN temp_pagerank nr ON tp.url_id = nr.url_id;
         
-                -- Mettre à jour les PageRanks
-                DELETE FROM temp_pagerank;
-                INSERT INTO temp_pagerank (url_id, rank)
-                SELECT url_id, rank FROM new_ranks;
-        
-                -- Nettoyer la table temporaire intermédiaire
-                DROP TABLE new_ranks;
-        
-                -- Incrémenter le compteur d'itérations
+                -- Increment the iteration counter
                 iteration := iteration + 1;
             END LOOP;
         
-            -- Étape 3: Mise à jour de la table finale `page_rank`
+            -- Step 4: Update the final `page_rank` table
             DELETE FROM page_rank;
             INSERT INTO page_rank (url_id, rank)
             SELECT url_id, rank FROM temp_pagerank;
         
-            -- Nettoyer la table temporaire
-            DROP TABLE temp_pagerank;
-        
-            RAISE NOTICE 'PageRank calculé après % itérations.', iteration;
+            RAISE NOTICE 'PageRank calculated after % iterations.', iteration;
         END;
         $$;
+
         """
     ]
     for sql_command in sql_commands:
