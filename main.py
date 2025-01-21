@@ -444,57 +444,79 @@ def init_database(cursor):
         $$;
         """,
         """
-        CREATE OR REPLACE PROCEDURE calculate_pagerank()
-        LANGUAGE plpgsql AS $$
+        CREATE OR REPLACE PROCEDURE calculate_pagerank(
+            d_param DOUBLE PRECISION DEFAULT 0.85,
+            epsilon_param DOUBLE PRECISION DEFAULT 0.0001,
+            max_iterations_param INT DEFAULT 100
+        )
+        LANGUAGE plpgsql AS
+        $$
         DECLARE
-            d CONSTANT DOUBLE PRECISION := 0.85; -- Damping factor
-            epsilon CONSTANT DOUBLE PRECISION := 0.0001; -- Convergence threshold
-            delta DOUBLE PRECISION := 1.0; -- Initial total difference
-            iteration INT := 0; -- Iteration counter
+            N INT;
+            delta DOUBLE PRECISION := 1.0;
+            iteration INT := 0;
         BEGIN
-            -- Step 1: Create the temporary table once
-            CREATE TEMP TABLE IF NOT EXISTS temp_pagerank (
-                url_id BIGINT PRIMARY KEY,
+            -- 1) Calcul du nombre total de pages
+            SELECT COUNT(*) INTO N
+            FROM urls;
+        
+            -- 2) Création de la table temporaire pour le rang courant
+            DROP TABLE IF EXISTS temp_pagerank;
+            CREATE TEMP TABLE temp_pagerank AS
+            SELECT id as url_id,
+                   1.0 / N AS rank
+            FROM urls;
+        
+            -- 3) Création de la table temporaire pour le rang de l'itération suivante
+            DROP TABLE IF EXISTS temp_pagerank_next;
+            CREATE TEMP TABLE temp_pagerank_next (
+                url_id INT,
                 rank DOUBLE PRECISION
-            ) ON COMMIT DROP;
+            );
         
-            -- Step 2: Initialize the temporary table with initial ranks
-            TRUNCATE temp_pagerank;
-            INSERT INTO temp_pagerank (url_id, rank)
-            SELECT DISTINCT
-                rl.source_url_id AS url_id,
-                1.0 / (SELECT COUNT(DISTINCT source_url_id) FROM resolved_links) AS rank
-            FROM resolved_links rl;
+            -- 4) Boucle d'itération
+            WHILE delta >= epsilon_param
+              AND iteration < max_iterations_param
+            LOOP
+                -- Vidage de la table pour y calculer les nouveaux rangs
+                TRUNCATE temp_pagerank_next;
         
-            -- Step 3: Iteratively compute PageRank
-            WHILE delta > epsilon AND iteration < 100 LOOP
-                -- Use a temporary in-memory table for new ranks
-                TRUNCATE temp_pagerank; -- Clear table for the next iteration
-                INSERT INTO temp_pagerank (url_id, rank)
+                -- 4.a) Calcul des nouveaux rangs
+                INSERT INTO temp_pagerank_next (url_id, rank)
                 SELECT
                     rl.destination_url_id AS url_id,
-                    (1 - d) + d * SUM(tp.rank / ol.outbound_count) AS rank
-                FROM
-                    resolved_links rl
-                INNER JOIN temp_pagerank tp ON rl.source_url_id = tp.url_id
-                INNER JOIN outgoing_links ol ON rl.source_url_id = ol.source_url_id
+                    (1 - d_param) / N + d_param * SUM(tp.rank / ol.outbound_count) AS rank
+                FROM resolved_links rl
+                JOIN temp_pagerank tp ON rl.source_url_id = tp.url_id
+                JOIN outgoing_links ol ON rl.source_url_id = ol.source_url_id
                 GROUP BY rl.destination_url_id;
         
-                -- Compute delta for convergence
-                SELECT SUM(ABS(tp.rank - nr.rank)) INTO delta
-                FROM temp_pagerank tp
-                INNER JOIN temp_pagerank nr ON tp.url_id = nr.url_id;
+                -- 4.b) Calcul du delta (somme des différences)
+                SELECT SUM(ABS(tpn.rank - tp.rank)) INTO delta
+                FROM temp_pagerank_next tpn
+                JOIN temp_pagerank tp ON tpn.url_id = tp.url_id;
         
-                -- Increment the iteration counter
+                -- 4.c) Recopie des nouveaux rangs dans la table de l'itération courante
+                TRUNCATE temp_pagerank;   -- on vide la table existante
+                INSERT INTO temp_pagerank (url_id, rank)
+                SELECT url_id, rank
+                FROM temp_pagerank_next;
+        
+                -- Incrémentation du compteur d'itérations
                 iteration := iteration + 1;
             END LOOP;
         
-            -- Step 4: Update the final `page_rank` table
-            DELETE FROM page_rank;
+            -- 5) Mise à jour de la table de PageRank finale
+            TRUNCATE page_rank;
             INSERT INTO page_rank (url_id, rank)
-            SELECT url_id, rank FROM temp_pagerank;
+            SELECT url_id, rank
+            FROM temp_pagerank;
         
-            RAISE NOTICE 'PageRank calculated after % iterations.', iteration;
+            -- 6) Nettoyage final des tables temporaires
+            DROP TABLE IF EXISTS temp_pagerank;
+            DROP TABLE IF EXISTS temp_pagerank_next;
+        
+            RAISE NOTICE 'PageRank calculated after % iterations with delta %', iteration, delta;
         END;
         $$;
 
